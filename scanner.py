@@ -229,6 +229,19 @@ def get_telegram_updates(token):
         return json.loads(resp.read().decode("utf-8"))
 
 
+def get_telegram_updates_long_poll(token, offset=None, timeout=20):
+    """Fetch updates using Telegram long-polling."""
+    if not token:
+        raise ValueError("Telegram Bot Token is required.")
+    endpoint = f"https://api.telegram.org/bot{token}/getUpdates?timeout={timeout}"
+    if offset is not None:
+        endpoint += f"&offset={offset}"
+    req = urllib.request.Request(endpoint, headers={"User-Agent": "Scanner"})
+    with urllib.request.urlopen(req, timeout=timeout + 15) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+
 def load_state(filepath):
     """Load persistent scanner state."""
     if os.path.exists(filepath):
@@ -420,26 +433,123 @@ def run_scan(config, dry_run=False, force_alert=False, init_only=False):
         }
 
 
-def run_daemon_loop(config):
-    """Run scanner continuously at the configured interval."""
+def run_listener_loop(config):
+    """
+    Run interactive bot listener that:
+    1. Responds immediately when you post 'scan' or '/scan' in Telegram.
+    2. Runs automatic periodic scans every SCAN_INTERVAL_MINUTES.
+    """
+    token = config.get("TELEGRAM_BOT_TOKEN")
+    chat_id = str(config.get("TELEGRAM_CHAT_ID", ""))
     interval_sec = config.get("SCAN_INTERVAL_MINUTES", 30) * 60
-    print(f"🔄 Starting background scanner daemon. Checking every {config.get('SCAN_INTERVAL_MINUTES', 30)} minutes.")
+    state_file = config.get("STATE_FILE", "state.json")
+
+    if not token:
+        raise ValueError("TELEGRAM_BOT_TOKEN is required to run the listener.")
+
+    print("🎧 AppleBOT Interactive Listener Starting...")
+    print(f"• Listening for 'scan' command in channel/chat: {chat_id}")
+    print(f"• Automatic periodic scans every {config.get('SCAN_INTERVAL_MINUTES', 30)} minutes.")
     print("Press Ctrl+C to stop.\n")
+
+    offset = None
+    try:
+        init_res = get_telegram_updates(token)
+        results = init_res.get("result", [])
+        if results:
+            offset = results[-1]["update_id"] + 1
+            get_telegram_updates_long_poll(token, offset=offset, timeout=1)
+    except Exception as e:
+        print(f"Notice during init check: {e}")
+
+    last_periodic_scan = time.time()
 
     while True:
         try:
-            run_scan(config)
-        except Exception as e:
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Error during scan: {e}")
+            # Check periodic scan
+            now = time.time()
+            if now - last_periodic_scan >= interval_sec:
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Running scheduled scan...")
+                try:
+                    run_scan(config)
+                except Exception as ex:
+                    print(f"Scheduled scan error: {ex}")
+                last_periodic_scan = now
 
-        print(f"Sleeping for {config.get('SCAN_INTERVAL_MINUTES', 30)} minutes...\n")
-        time.sleep(interval_sec)
+            # Poll for new Telegram messages (10 seconds timeout)
+            updates_data = get_telegram_updates_long_poll(token, offset=offset, timeout=10)
+            updates = updates_data.get("result", [])
+
+            for u in updates:
+                offset = u["update_id"] + 1
+                msg_obj = u.get("channel_post") or u.get("message")
+                if not msg_obj:
+                    continue
+
+                text = (msg_obj.get("text") or "").strip().lower()
+                target_chat = str(msg_obj.get("chat", {}).get("id"))
+
+                if text in ["scan", "/scan", "!scan", "check", "/check"]:
+                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Received '{text}' command from chat {target_chat}!")
+                    try:
+                        send_telegram_message(
+                            token,
+                            target_chat,
+                            "🔍 <i>Scanning playlist now...</i>",
+                        )
+                        res = run_scan(config)
+                        if res.get("action") == "pending":
+                            send_telegram_message(
+                                token,
+                                target_chat,
+                                f"✅ <b>Scan complete!</b> No new songs added since last drop.\n"
+                                f"📊 Total tracks: <b>{res.get('total_count')}</b> songs\n"
+                                f"⏳ Waiting for next drop.",
+                            )
+                        elif res.get("action") == "alerted":
+                            print("Drop alert sent successfully!")
+                    except Exception as ex:
+                        send_telegram_message(token, target_chat, f"❌ Error during scan: {ex}")
+
+                elif text in ["status", "/status"]:
+                    st = load_state(state_file)
+                    if st:
+                        status_text = (
+                            f"📊 <b>Playlist Status:</b>\n"
+                            f"🎵 <b>{st.get('playlist_name')}</b>\n"
+                            f"🔢 Total tracks: <b>{st.get('last_notified_count')}</b>\n"
+                            f"🕒 Last checked: {st.get('last_scan_time', '')[:19].replace('T', ' ')}"
+                        )
+                    else:
+                        status_text = "📊 No state recorded yet."
+                    send_telegram_message(token, target_chat, status_text)
+
+                elif text in ["help", "/help", "/start"]:
+                    help_text = (
+                        "🤖 <b>AppleBOT Commands:</b>\n"
+                        "• <code>scan</code> — Scan playlist immediately for new tracks\n"
+                        "• <code>status</code> — View current track count & last check"
+                    )
+                    send_telegram_message(token, target_chat, help_text)
+
+        except urllib.error.URLError:
+            time.sleep(2)
+        except Exception as e:
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Listener error: {e}")
+            time.sleep(3)
+
+
+def run_daemon_loop(config):
+    """Alias to run_listener_loop."""
+    run_listener_loop(config)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Apple Music Playlist Scanner for Telegram")
     parser.add_argument("--check", action="store_true", help="Run a single check now")
-    parser.add_argument("--daemon", action="store_true", help="Run continuously in the background")
+    parser.add_argument("--listen", action="store_true", help="Listen for 'scan' commands in Telegram while scanning periodically")
+    parser.add_argument("--daemon", action="store_true", help="Run continuously in the background (listens for 'scan')")
+
     parser.add_argument("--init", action="store_true", help="Initialize or reset baseline without sending an alert")
     parser.add_argument("--dry-run", action="store_true", help="Scan and simulate alert without sending to Telegram")
     parser.add_argument("--force-alert", action="store_true", help="Force send an alert message regardless of threshold")
@@ -527,9 +637,10 @@ def main():
             print(f"  Configured Threshold: {config.get('THRESHOLD')}")
         return
 
-    # Action 4: Run scan or daemon
-    if args.daemon:
+    # Action 4: Run scan or daemon/listener
+    if args.daemon or args.listen:
         run_daemon_loop(config)
+
     else:
         # Default is single check
         try:
