@@ -301,51 +301,83 @@ def fetch_bpm_and_key(title, artist, api_key=None):
 
     clean_title = clean_search_term(title)
     clean_artist = clean_search_term(artist)
-    query = f"{clean_title} {clean_artist}".strip()
-    if not query:
-        query = title
+    if not clean_title:
+        clean_title = title
 
-    lookup_url = f"https://api.getsongbpm.com/search/?api_key={api_key}&type=both&lookup={urllib.parse.quote(query)}"
-    headers = {"User-Agent": "PlaylistDropScanner/1.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+
+    # Attempt 1: type=both with song:X artist:Y
+    query_both = f"song:{clean_title} artist:{clean_artist}".strip()
+    url_both = f"https://api.getsong.co/search/?api_key={api_key}&type=both&lookup={urllib.parse.quote(query_both)}"
+
+    result_entry = None
     try:
-        req = urllib.request.Request(lookup_url, headers=headers)
+        req = urllib.request.Request(url_both, headers=headers)
         with urllib.request.urlopen(req, timeout=6) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             results = data.get("search", [])
-            if results and isinstance(results, list):
-                first = results[0]
-                tempo = first.get("tempo") or first.get("bpm")
-                key_raw = first.get("key_of") or first.get("key")
-                if tempo or key_raw:
-                    try:
-                        bpm_val = int(round(float(tempo)))
-                    except (ValueError, TypeError):
-                        bpm_val = tempo
-
-                    camelot = to_camelot(key_raw) if key_raw else ""
-                    key_display = key_raw or ""
-                    if camelot and key_display:
-                        key_annot = f"{camelot} ({key_display})"
-                    elif camelot:
-                        key_annot = camelot
-                    else:
-                        key_annot = key_display
-
-                    annotation_parts = []
-                    if bpm_val:
-                        annotation_parts.append(f"{bpm_val} BPM")
-                    if key_annot:
-                        annotation_parts.append(key_annot)
-
-                    return {
-                        "bpm": bpm_val,
-                        "key": key_display,
-                        "camelot": camelot,
-                        "annotation": " • ".join(annotation_parts),
-                    }
+            if isinstance(results, list) and results:
+                result_entry = results[0]
     except Exception:
         pass
+
+    # Attempt 2: fallback to type=song with clean_title
+    if not result_entry:
+        url_song = f"https://api.getsong.co/search/?api_key={api_key}&type=song&lookup={urllib.parse.quote(clean_title)}"
+        try:
+            req = urllib.request.Request(url_song, headers=headers)
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                results = data.get("search", [])
+                if isinstance(results, list) and results:
+                    # Match by artist name if possible
+                    for r in results:
+                        r_artist = r.get("artist", {}).get("name", "").lower()
+                        if clean_artist.lower() in r_artist or r_artist in clean_artist.lower():
+                            result_entry = r
+                            break
+                    if not result_entry:
+                        result_entry = results[0]
+        except Exception:
+            pass
+
+    if result_entry and isinstance(result_entry, dict):
+        tempo = result_entry.get("tempo") or result_entry.get("bpm")
+        key_raw = result_entry.get("key_of") or result_entry.get("key")
+        if tempo or key_raw:
+            try:
+                bpm_val = int(round(float(tempo)))
+            except (ValueError, TypeError):
+                bpm_val = tempo
+
+            # Normalize musical sharps and flats
+            if key_raw:
+                key_raw = key_raw.replace("\u266f", "#").replace("\u266d", "b")
+
+            camelot = to_camelot(key_raw) if key_raw else ""
+            key_display = key_raw or ""
+            if camelot and key_display:
+                key_annot = f"{camelot} ({key_display})"
+            elif camelot:
+                key_annot = camelot
+            else:
+                key_annot = key_display
+
+            annotation_parts = []
+            if bpm_val:
+                annotation_parts.append(f"{bpm_val} BPM")
+            if key_annot:
+                annotation_parts.append(key_annot)
+
+            return {
+                "bpm": bpm_val,
+                "key": key_display,
+                "camelot": camelot,
+                "annotation": " • ".join(annotation_parts),
+            }
+
     return None
+
 
 
 def load_state(filepath):
