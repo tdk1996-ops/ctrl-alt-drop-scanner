@@ -56,8 +56,9 @@ def get_config():
         "PLAYLIST_URL": env("PLAYLIST_URL", ""),
         "TELEGRAM_BOT_TOKEN": env("TELEGRAM_BOT_TOKEN", ""),
         "TELEGRAM_CHAT_ID": env("TELEGRAM_CHAT_ID", ""),
-        "THRESHOLD": int(env("THRESHOLD", "10")),
+        "THRESHOLD": int(env("THRESHOLD", "1")),
         "SCAN_INTERVAL_MINUTES": int(env("SCAN_INTERVAL_MINUTES", "30")),
+
         "STATE_FILE": env("STATE_FILE", os.path.join(script_dir, "state.json")),
     }
 
@@ -120,9 +121,16 @@ def parse_playlist(html, default_url=""):
         if desc_match:
             song_count = int(desc_match.group(1))
 
-    # 4. Extract individual tracks from serialized JSON
+    # 4. Extract individual tracks and song URLs
     tracks = []
     seen_ids = set()
+
+    # Pre-parse meta songs for fallback URLs
+    meta_songs = re.findall(r'<meta\s+property=["\']music:song["\']\s+content=["\'](.*?)["\']', html)
+    meta_url_map = {}
+    for ms in meta_songs:
+        tid = ms.rstrip("/").split("/")[-1]
+        meta_url_map[tid] = ms
 
     script_match = re.search(
         r'<script\s+type=["\']application/json["\']\s+id=["\']serialized-server-data["\']>(.*?)</script>',
@@ -138,11 +146,17 @@ def parse_playlist(html, default_url=""):
                 for section in inner_data.get("sections", []):
                     if section.get("itemKind") == "trackLockup":
                         for item in section.get("items", []):
-                            track_id = item.get("id") or str(
-                                item.get("contentDescriptor", {}).get("identifiers", {}).get("storeAdamID", "")
-                            )
+                            cd = item.get("contentDescriptor", {})
+                            identifiers = cd.get("identifiers", {})
+                            adam_id = str(identifiers.get("storeAdamID", ""))
+                            track_id = item.get("id") or adam_id
                             title = item.get("title") or "Unknown Title"
                             artist = item.get("artistName") or "Unknown Artist"
+
+                            # Direct song URL
+                            song_url = cd.get("url") or meta_url_map.get(adam_id) or ""
+                            if not song_url and adam_id:
+                                song_url = f"https://music.apple.com/song/{adam_id}"
 
                             # Create a unique key
                             unique_key = track_id if track_id else f"{title} - {artist}"
@@ -152,14 +166,14 @@ def parse_playlist(html, default_url=""):
                                     "id": unique_key,
                                     "title": title,
                                     "artist": artist,
+                                    "url": song_url,
                                 })
         except Exception:
             pass
 
     # 5. Fallback for tracks using <meta property="music:song">
     if not tracks:
-        song_links = re.findall(r'<meta\s+property=["\']music:song["\']\s+content=["\'](.*?)["\']', html)
-        for link in song_links:
+        for link in meta_songs:
             track_id = link.rstrip("/").split("/")[-1]
             if track_id not in seen_ids:
                 seen_ids.add(track_id)
@@ -167,6 +181,7 @@ def parse_playlist(html, default_url=""):
                     "id": track_id,
                     "title": f"Song {track_id}",
                     "artist": "",
+                    "url": link,
                 })
 
     # If song_count was still not determined, use tracks length
@@ -243,30 +258,36 @@ def save_state(filepath, state):
 def build_alert_message(playlist_name, playlist_url, added_count, total_count, new_tracks=None):
     """Construct a clean, engaging Telegram HTML notification."""
     now_str = datetime.now().strftime("%b %d, %Y - %I:%M %p")
+    header_alert = (
+        "🔥 <b>New track added!</b>"
+        if added_count == 1
+        else f"🔥 <b>+{added_count} new songs added!</b>"
+    )
     msg = [
         f"🎧 <b>{playlist_name} Update!</b> 🎧",
         f"<i>{now_str}</i>\n",
-        f"🔥 <b>+{added_count} new song{'s' if added_count != 1 else ''} added</b> since last drop!",
+        header_alert,
         f"📊 <b>Total tracks:</b> {total_count} songs\n",
     ]
 
     if new_tracks and len(new_tracks) > 0:
-        msg.append("<b>🎵 Newly Added Songs:</b>")
-        # Display up to 15 tracks
-        preview_tracks = new_tracks[:15]
+        msg.append("<b>🎵 Newly Added Tracks:</b>")
+        preview_tracks = new_tracks[:20]
         for t in preview_tracks:
             title = t.get("title", "Unknown")
             artist = t.get("artist", "")
-            if artist:
-                msg.append(f"• <b>{title}</b> — {artist}")
+            song_url = t.get("url", "")
+            artist_part = f" — {artist}" if artist else ""
+            if song_url:
+                msg.append(f'• <a href="{song_url}"><b>{title}</b></a>{artist_part}')
             else:
-                msg.append(f"• <b>{title}</b>")
+                msg.append(f"• <b>{title}</b>{artist_part}")
 
-        if len(new_tracks) > 15:
-            msg.append(f"<i>...and {len(new_tracks) - 15} more tracks</i>")
+        if len(new_tracks) > 20:
+            msg.append(f"<i>...and {len(new_tracks) - 20} more tracks</i>")
         msg.append("")
 
-    msg.append(f"🔗 <b>Download & Listen here:</b>\n{playlist_url}")
+    msg.append(f'📁 <b>Full Playlist:</b>\n<a href="{playlist_url}">{playlist_url}</a>')
     return "\n".join(msg)
 
 
@@ -280,7 +301,8 @@ def run_scan(config, dry_run=False, force_alert=False, init_only=False):
     if not url:
         raise ValueError("PLAYLIST_URL is not set. Please add it to your .env file.")
 
-    threshold = config.get("THRESHOLD", 10)
+    threshold = config.get("THRESHOLD", 1)
+
     state_file = config.get("STATE_FILE", "state.json")
     bot_token = config.get("TELEGRAM_BOT_TOKEN")
     chat_id = config.get("TELEGRAM_CHAT_ID")

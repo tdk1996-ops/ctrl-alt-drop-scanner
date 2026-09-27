@@ -1,13 +1,16 @@
 # 🎧 Apple Music Playlist Scanner to Telegram
 
-Automated scanner for your shared Apple Music playlist (e.g. **CTRL+ALT+DROP**). Whenever **10+ new songs** are added (either all at once or accumulated over time), it automatically sends the updated playlist link and track list directly to your designated **Telegram channel**.
+Automated scanner for your shared Apple Music playlist (e.g. **CTRL+ALT+DROP 2.5**). Whenever **any new song is added**, it automatically sends an update with direct individual links to the newly added songs and the full playlist directly to your **Telegram channel**.
 
 ---
 
 ## ✨ Features
 
 - **No Apple Developer Account or API Keys Required**: Seamlessly parses public/shared Apple Music playlist pages without needing a \$99/year developer membership.
-- **Smart Accumulative Delta Tracking**: Tracks additions over time. If 2 songs are added on Monday, 3 on Tuesday, and 5 on Friday (total 10), it triggers!
+- **Instant Drop Alerts**: Configured to alert after **any** newly added song (threshold = 1), or any custom threshold you choose.
+- **Individual Clickable Song Links**: Each newly dropped track includes a direct clickable link to that specific song in Apple Music for instant previewing/downloading.
+- **Smart Accumulative Delta Tracking**: Accurately tracks additions and deduplicates songs by Apple Music track ID.
+
 - **Rich Telegram Drop Alert**:
   - Displays playlist name & direct Apple Music link.
   - Shows total track count and count of new additions.
