@@ -1,0 +1,6 @@
+# This project has ZERO required external dependencies!
+# It runs directly on Python 3.8+ using only standard library modules:
+# (urllib, json, re, argparse, datetime, os, sys, time)
+#
+# Optional:
+# requests>=2.31.0

@@ -1,0 +1,14 @@
+# Environment and Secrets (CRITICAL: never commit your Telegram tokens)
+.env
+*.env.local
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+
+# Temporary files
+*.tmp
+run_silent.vbs
