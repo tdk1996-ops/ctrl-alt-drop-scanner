@@ -8,9 +8,9 @@ Automated scanner for your shared Apple Music playlist (e.g. **CTRL+ALT+DROP 2.5
 
 - **No Apple Developer Account or API Keys Required**: Seamlessly parses public/shared Apple Music playlist pages without needing a \$99/year developer membership.
 - **Instant Drop Alerts**: Configured to alert after **any** newly added song (threshold = 1), or any custom threshold you choose.
-- **Individual Clickable Song Links**: Each newly dropped track includes a direct clickable link to that specific song in Apple Music for instant previewing/downloading.
-- **BPM & Key Annotations (with Camelot Notation)**: Optional automatic lookup for Tempo (BPM), Musical Key, and Camelot wheel notation (e.g. `⚡ 128 BPM • 11A (F#m)`) powered by GetSongBPM.
+- **BPM & Key Annotations (with Camelot Notation)**: Optional automatic lookup for Tempo (BPM), Musical Key, and Camelot wheel notation (e.g. `⚡ 128 BPM • 11A (F#m)`) powered by [GetSongBPM](https://getsongbpm.com).
 - **Smart Accumulative Delta Tracking**: Accurately tracks additions and deduplicates songs by Apple Music track ID.
+
 
 
 - **Rich Telegram Drop Alert**:
@@ -157,3 +157,10 @@ If you don't want to leave your computer running:
 - `run_daemon.bat` — Windows shortcut to launch continuous scanning.
 - `setup_windows_task.bat` — Windows Task Scheduler installer for automatic 30-min background scans.
 - `.github/workflows/scanner.yml` — Cloud automation configuration for GitHub Actions.
+
+---
+
+## 🙏 Credits & Backlinks
+
+- BPM and Musical Key data provided by **[GetSongBPM](https://getsongbpm.com)**.
+
