@@ -56,11 +56,13 @@ def get_config():
         "PLAYLIST_URL": env("PLAYLIST_URL", ""),
         "TELEGRAM_BOT_TOKEN": env("TELEGRAM_BOT_TOKEN", ""),
         "TELEGRAM_CHAT_ID": env("TELEGRAM_CHAT_ID", ""),
+        "GETSONGBPM_API_KEY": env("GETSONGBPM_API_KEY", ""),
         "THRESHOLD": int(env("THRESHOLD", "1")),
         "SCAN_INTERVAL_MINUTES": int(env("SCAN_INTERVAL_MINUTES", "30")),
 
         "STATE_FILE": env("STATE_FILE", os.path.join(script_dir, "state.json")),
     }
+
 
 
 def fetch_playlist_html(url):
@@ -241,8 +243,113 @@ def get_telegram_updates_long_poll(token, offset=None, timeout=20):
         return json.loads(resp.read().decode("utf-8"))
 
 
+# Camelot Wheel Mapping for DJ Mixing
+CAMELOT_MAP = {
+    # Minors (A)
+    "abm": "1A", "g#m": "1A", "g# minor": "1A", "ab minor": "1A",
+    "ebm": "2A", "d#m": "2A", "d# minor": "2A", "eb minor": "2A",
+    "bbm": "3A", "a#m": "3A", "a# minor": "3A", "bb minor": "3A",
+    "fm": "4A", "f minor": "4A",
+    "cm": "5A", "c minor": "5A",
+    "gm": "6A", "g minor": "6A",
+    "dm": "7A", "d minor": "7A",
+    "am": "8A", "a minor": "8A",
+    "em": "9A", "e minor": "9A",
+    "bm": "10A", "b minor": "10A",
+    "f#m": "11A", "gbm": "11A", "f# minor": "11A", "gb minor": "11A",
+    "c#m": "12A", "dbm": "12A", "c# minor": "12A", "db minor": "12A",
+    # Majors (B)
+    "b": "1B", "b major": "1B", "b maj": "1B",
+    "f#": "2B", "gb": "2B", "f# major": "2B", "gb major": "2B",
+    "c#": "3B", "db": "3B", "c# major": "3B", "db major": "3B",
+    "g#": "4B", "ab": "4B", "g# major": "4B", "ab major": "4B",
+    "d#": "5B", "eb": "5B", "d# major": "5B", "eb major": "5B",
+    "a#": "6B", "bb": "6B", "a# major": "6B", "bb major": "6B",
+    "f": "7B", "f major": "7B", "f maj": "7B",
+    "c": "8B", "c major": "8B", "c maj": "8B",
+    "g": "9B", "g major": "9B", "g maj": "9B",
+    "d": "10B", "d major": "10B", "d maj": "10B",
+    "a": "11B", "a major": "11B", "a maj": "11B",
+    "e": "12B", "e major": "12B", "e maj": "12B",
+}
+
+
+def to_camelot(key_str):
+    """Convert musical key string to Camelot Wheel notation."""
+    if not key_str:
+        return ""
+    k = key_str.strip().lower()
+    if re.match(r'^\d{1,2}[ab]$', k, re.I):
+        return key_str.upper()
+    return CAMELOT_MAP.get(k, "")
+
+
+def clean_search_term(term):
+    """Clean track title or artist for lookup by stripping feat, remix, etc."""
+    if not term:
+        return ""
+    cleaned = re.sub(r'[\(\[\{](?:feat|ft|with|remix|edit|mix)[^\)\]\}]*[\)\]\}]', '', term, flags=re.I)
+    cleaned = re.sub(r'[,&/].*$', '', cleaned)
+    cleaned = re.sub(r'[^\w\s-]', '', cleaned).strip()
+    return cleaned
+
+
+def fetch_bpm_and_key(title, artist, api_key=None):
+    """Query GetSongBPM API to retrieve BPM and Musical Key with Camelot notation."""
+    if not api_key:
+        return None
+
+    clean_title = clean_search_term(title)
+    clean_artist = clean_search_term(artist)
+    query = f"{clean_title} {clean_artist}".strip()
+    if not query:
+        query = title
+
+    lookup_url = f"https://api.getsongbpm.com/search/?api_key={api_key}&type=both&lookup={urllib.parse.quote(query)}"
+    headers = {"User-Agent": "PlaylistDropScanner/1.0"}
+    try:
+        req = urllib.request.Request(lookup_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            results = data.get("search", [])
+            if results and isinstance(results, list):
+                first = results[0]
+                tempo = first.get("tempo") or first.get("bpm")
+                key_raw = first.get("key_of") or first.get("key")
+                if tempo or key_raw:
+                    try:
+                        bpm_val = int(round(float(tempo)))
+                    except (ValueError, TypeError):
+                        bpm_val = tempo
+
+                    camelot = to_camelot(key_raw) if key_raw else ""
+                    key_display = key_raw or ""
+                    if camelot and key_display:
+                        key_annot = f"{camelot} ({key_display})"
+                    elif camelot:
+                        key_annot = camelot
+                    else:
+                        key_annot = key_display
+
+                    annotation_parts = []
+                    if bpm_val:
+                        annotation_parts.append(f"{bpm_val} BPM")
+                    if key_annot:
+                        annotation_parts.append(key_annot)
+
+                    return {
+                        "bpm": bpm_val,
+                        "key": key_display,
+                        "camelot": camelot,
+                        "annotation": " • ".join(annotation_parts),
+                    }
+    except Exception:
+        pass
+    return None
+
 
 def load_state(filepath):
+
     """Load persistent scanner state."""
     if os.path.exists(filepath):
         try:
@@ -290,11 +397,16 @@ def build_alert_message(playlist_name, playlist_url, added_count, total_count, n
             title = t.get("title", "Unknown")
             artist = t.get("artist", "")
             song_url = t.get("url", "")
+            bpm_info = t.get("bpm_info")
             artist_part = f" — {artist}" if artist else ""
             if song_url:
                 msg.append(f'• <a href="{song_url}"><b>{title}</b></a>{artist_part}')
             else:
                 msg.append(f"• <b>{title}</b>{artist_part}")
+
+            if bpm_info and bpm_info.get("annotation"):
+                msg.append(f"  ⚡ <i>{bpm_info['annotation']}</i>")
+
 
         if len(new_tracks) > 20:
             msg.append(f"<i>...and {len(new_tracks) - 20} more tracks</i>")
@@ -375,6 +487,17 @@ def run_scan(config, dry_run=False, force_alert=False, init_only=False):
 
     if should_alert:
         print(f"🚀 Trigger condition met! (+{added_count} songs >= threshold {threshold})")
+
+        # Optional BPM / Key annotation lookup
+        bpm_api_key = config.get("GETSONGBPM_API_KEY")
+        if bpm_api_key and new_tracks:
+            print("🎧 Looking up BPM and Key for new tracks...")
+            for t in new_tracks[:15]:
+                info = fetch_bpm_and_key(t.get("title", ""), t.get("artist", ""), bpm_api_key)
+                if info:
+                    t["bpm_info"] = info
+                    print(f"  ⚡ {t.get('title')} -> {info.get('annotation')}")
+
         msg = build_alert_message(
             playlist_name=playlist_name,
             playlist_url=url,
@@ -382,6 +505,7 @@ def run_scan(config, dry_run=False, force_alert=False, init_only=False):
             total_count=current_count,
             new_tracks=new_tracks if new_tracks else None,
         )
+
 
         if dry_run:
             print("\n--- [DRY RUN] Telegram Message Preview ---")
