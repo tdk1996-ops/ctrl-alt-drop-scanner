@@ -87,6 +87,106 @@ def fetch_playlist_html(url):
         raise RuntimeError(f"Failed to fetch playlist: {e}")
 
 
+FALLBACK_APPLE_TOKEN = (
+    "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiIsImtpZCI6IldlYlBsYXlLaWQifQ."
+    "eyJpc3MiOiJBTVBXZWJQbGF5IiwiaWF0IjoxNzg5Njg4NzA5LCJleHAiOjE3OTU3MzY3MDksInJvb3RfaHR0cHNfb3JpZ2luIjpbImFwcGxlLmNvbSJdfQ."
+    "y0gd6YWyrUrZx-YZNZS0xVHkDHGr-kGZ9RrsWRfApGc2-_NNC968VsD36hRU33s5BBs4KdB7LIZTmYqPra097Q"
+)
+
+_CACHED_APPLE_TOKEN = None
+
+
+def get_apple_token(html=None):
+    """Get a valid Apple Music web Bearer token, using cache, extracting from JS, or fallback."""
+    global _CACHED_APPLE_TOKEN
+    if _CACHED_APPLE_TOKEN:
+        return _CACHED_APPLE_TOKEN
+
+    if html:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        js_paths = re.findall(r'src=["\']([^"\']*index[^"\']*\.js)["\']', html)
+        for js_path in js_paths:
+            js_url = "https://music.apple.com" + js_path if not js_path.startswith("http") else js_path
+            try:
+                req = urllib.request.Request(js_url, headers=headers)
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    content = resp.read().decode("utf-8", errors="ignore")
+                    tokens = re.findall(r'eyJ0[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+', content)
+                    for t in tokens:
+                        if len(t) > 200:
+                            _CACHED_APPLE_TOKEN = t
+                            return _CACHED_APPLE_TOKEN
+            except Exception:
+                pass
+
+    _CACHED_APPLE_TOKEN = FALLBACK_APPLE_TOKEN
+    return _CACHED_APPLE_TOKEN
+
+
+def fetch_paginated_tracks(initial_next_url, playlist_id, html=None):
+    """
+    Fetch paginated tracks beyond the 300 track HTML cap using Apple Music's Web API.
+    """
+    global _CACHED_APPLE_TOKEN
+    tracks = []
+    token = get_apple_token(html)
+    next_url = initial_next_url
+
+    while next_url:
+        full_url = "https://amp-api.music.apple.com" + next_url if not next_url.startswith("http") else next_url
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Origin": "https://music.apple.com",
+            "Referer": "https://music.apple.com/",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        }
+        res = None
+        try:
+            req = urllib.request.Request(full_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                res = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                # Token expired or unauthorized; invalidate and retry with fresh/fallback token
+                _CACHED_APPLE_TOKEN = None
+                token = get_apple_token(html)
+                headers["Authorization"] = f"Bearer {token}"
+                try:
+                    req = urllib.request.Request(full_url, headers=headers)
+                    with urllib.request.urlopen(req, timeout=15) as resp:
+                        res = json.loads(resp.read().decode("utf-8"))
+                except Exception as retry_err:
+                    print(f"Warning: Retry pagination failed: {retry_err}")
+                    break
+            else:
+                print(f"Warning: Pagination HTTP error {e.code}: {e.reason}")
+                break
+        except Exception as e:
+            print(f"Warning: Pagination fetch error: {e}")
+            break
+
+        if not res:
+            break
+
+        data = res.get("data", [])
+        for item in data:
+            item_id = str(item.get("id", ""))
+            attrs = item.get("attributes", {})
+            title = attrs.get("name") or "Unknown Title"
+            artist = attrs.get("artistName") or "Unknown Artist"
+            song_url = attrs.get("url") or (f"https://music.apple.com/song/{item_id}" if item_id else "")
+            unique_key = f"track-lockup - {playlist_id} - {item_id}" if playlist_id and item_id else item_id
+            tracks.append({
+                "id": unique_key,
+                "title": title,
+                "artist": artist,
+                "url": song_url,
+            })
+        next_url = res.get("next")
+
+    return tracks
+
+
 def parse_playlist(html, default_url=""):
     """
     Extract playlist metadata and tracklist from Apple Music HTML.
@@ -139,13 +239,19 @@ def parse_playlist(html, default_url=""):
         html,
         re.DOTALL,
     )
+    next_intent = None
     if script_match:
         try:
             raw_data = json.loads(script_match.group(1))
             data_arr = raw_data.get("data", [])
             for entry in data_arr:
                 inner_data = entry.get("data", {})
+                if not next_intent:
+                    if "nextIntent" in inner_data:
+                        next_intent = inner_data["nextIntent"]
                 for section in inner_data.get("sections", []):
+                    if not next_intent and "nextIntent" in section:
+                        next_intent = section["nextIntent"]
                     if section.get("itemKind") == "trackLockup":
                         for item in section.get("items", []):
                             cd = item.get("contentDescriptor", {})
@@ -173,6 +279,19 @@ def parse_playlist(html, default_url=""):
         except Exception:
             pass
 
+    # Follow pagination beyond the 300 track HTML cap if nextIntent is present
+    if next_intent and next_intent.get("url"):
+        next_url = next_intent.get("url")
+        playlist_id = next_intent.get("id") or ""
+        try:
+            paginated_tracks = fetch_paginated_tracks(next_url, playlist_id, html=html)
+            for pt in paginated_tracks:
+                if pt["id"] not in seen_ids:
+                    seen_ids.add(pt["id"])
+                    tracks.append(pt)
+        except Exception as e:
+            print(f"Warning: Failed to fetch paginated tracks: {e}")
+
     # 5. Fallback for tracks using <meta property="music:song">
     if not tracks:
         for link in meta_songs:
@@ -186,8 +305,8 @@ def parse_playlist(html, default_url=""):
                     "url": link,
                 })
 
-    # If song_count was still not determined, use tracks length
-    if song_count is None:
+    # Update song_count: Apple's meta tag caps at 300, so tracks count is authoritative if higher
+    if song_count is None or len(tracks) > song_count:
         song_count = len(tracks)
 
     return {
