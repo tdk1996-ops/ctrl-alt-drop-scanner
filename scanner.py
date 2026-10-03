@@ -10,6 +10,7 @@ import sys
 import json
 import time
 import re
+import socket
 import argparse
 import urllib.request
 import urllib.parse
@@ -708,12 +709,29 @@ def run_scan(config, dry_run=False, force_alert=False, init_only=False):
         }
 
 
+def acquire_single_instance_lock(port=48921):
+    """Ensure only one instance of the listener runs at a time on this machine."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", port))
+        s.listen(1)
+        return s
+    except (socket.error, OSError):
+        return None
+
+
 def run_listener_loop(config):
     """
     Run interactive bot listener that:
     1. Responds immediately when you post 'scan' or '/scan' in Telegram.
     2. Runs automatic periodic scans every SCAN_INTERVAL_MINUTES.
     """
+    lock_sock = acquire_single_instance_lock()
+    if not lock_sock:
+        print("⚠️ Another instance of AppleBOT listener is already running on this PC.")
+        print("Exiting duplicate process to avoid polling conflicts.")
+        return
+
     token = config.get("TELEGRAM_BOT_TOKEN")
     chat_id = str(config.get("TELEGRAM_CHAT_ID", ""))
     interval_sec = config.get("SCAN_INTERVAL_MINUTES", 30) * 60
@@ -732,8 +750,17 @@ def run_listener_loop(config):
         init_res = get_telegram_updates(token)
         results = init_res.get("result", [])
         if results:
-            offset = results[-1]["update_id"] + 1
-            get_telegram_updates_long_poll(token, offset=offset, timeout=1)
+            # Only advance offset past old messages (> 3 minutes ago)
+            # so recent user commands sent right before start are immediately handled!
+            now_ts = time.time()
+            old_results = [
+                r for r in results
+                if (r.get("message") or r.get("channel_post") or {}).get("date", 0) < (now_ts - 180)
+            ]
+            if old_results:
+                offset = old_results[-1]["update_id"] + 1
+            else:
+                offset = results[0]["update_id"]
     except Exception as e:
         print(f"Notice during init check: {e}")
 
